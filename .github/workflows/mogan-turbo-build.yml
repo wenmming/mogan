@@ -129,11 +129,19 @@ jobs:
           xmake-version: latest  # 或指定版本号，如 v2.9.8
           # windows-long-path-support: true # Windows下如有长路径需求，可取消注释
 
-      - name: Install MinGW (Windows)
-        # Mogan 在 Windows 上需要 MinGW（MSVC 不支持变长数组）
+      - name: Setup MSYS2 (Windows)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: |
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-make
+
+      - name: Add MSYS2 MinGW to PATH
         run: |
-          choco install mingw --version=13.2.0 -y --no-progress
-          refreshenv
+          echo "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "C:\msys64\usr\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Install Qt 5 (Windows)
         run: |
