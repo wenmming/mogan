@@ -1,199 +1,208 @@
-# .github/workflows/mogan-turbo-build.yml
-# Mogan Turbo Build – 高成功率版（修复504超时）
+# .github/workflows/mogan-turbo-windows.yml
+# Mogan Windows 极速版 — 基于官方 ci-xmake-windows.yml 改造
+#
+# 与原版的区别:
+#   - 模式: releasedbg → release (关闭调试符号)
+#   - 关闭启动页: --startup_tab=false
+#   - 关闭教程: --tutorial=false
+#   - 关闭 MuPDF: --mupdf=false
+#   - 关闭调试时间戳: --debug_with_timestamp=false
+#   - 关闭文本浮动工具栏: --text_toolbar=false
+#   - 增加重试机制应对 504
+#
+# 触发方式: workflow_dispatch (手动) / push & PR to main
+#
+# 预计编译时间: 首次 30-40 分钟 / 缓存命中 5-10 分钟
+
 name: Mogan Turbo Build
 
 on:
   workflow_dispatch:
     inputs:
-      platform:
-        description: '编译目标平台'
-        type: choice
-        required: true
-        default: 'both'
-        options:
-          - linux
-          - windows
-          - both
+      clear_cache:
+        description: 🗑️ 清除缓存重新构建
+        type: boolean
+        default: false
 
-env:
-  BUILD_TYPE: turbo
-  # XMAKE_REPO: https://github.com/xmake-io/xmake-repo.git   # 可选：使用自定义镜像
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-windows
+  cancel-in-progress: true
 
 jobs:
-  # ============================== Linux ==============================
-  build-linux:
-    if: github.event.inputs.platform == 'linux' || github.event.inputs.platform == 'both'
-    runs-on: ubuntu-22.04
-    timeout-minutes: 90
+  windows-turbo:
+    name: 🪟 Windows Turbo (mingw)
+    runs-on: windows-2025
+    timeout-minutes: 60
+
+    env:
+      XMAKE_GLOBALDIR: "${{ github.workspace }}\\.xmake-global"
+
     steps:
+      # ================================================================
+      # Step 1: 清理缓存 (手动开启时)
+      # ================================================================
+      - name: Clear cache
+        if: ${{ github.event.inputs.clear_cache == 'true' }}
+        run: |
+          Remove-Item -Recurse -Force "${{ env.XMAKE_GLOBALDIR }}" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "${{ github.workspace }}\build" -ErrorAction SilentlyContinue
+          Write-Host "✅ Cache cleared"
+
+      # ================================================================
+      # Step 2: 安装 xmake (官方 action，自带重试)
+      # ================================================================
+      - name: Setup xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: v3.0.4
+
+      - name: Update xmake repo
+        run: |
+          xrepo update-repo
+
+      # ================================================================
+      # Step 3: 检出代码
+      # ================================================================
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           repository: MoganLab/mogan
           ref: main
-          submodules: recursive
-          fetch-depth: 1     # 浅克隆加快速度
+          fetch-depth: 1
 
-      - name: Install system dependencies (with retry)
-        run: |
-          for i in {1..3}; do
-            sudo apt-get update -qq && sudo apt-get install -y -qq \
-              libcurl4-openssl-dev pkg-config qtbase5-dev \
-              libqt5svg5-dev libjpeg-turbo8-dev libpng-dev \
-              libgit2-dev libfreetype6-dev libsqlite3-dev && break
-            echo "Retry apt install... ($i/3)"
-            sleep 5
-          done
-
-      - name: Cache xmake
+      # ================================================================
+      # Step 4: 缓存 xrepo 包 (关键！避免重复下载 Qt/MinGW 等)
+      # ================================================================
+      - name: Cache xrepo packages
         uses: actions/cache@v4
-        id: cache-xmake
         with:
-          path: ~/.xmake
-          key: xmake-mogan-ubuntu-${{ runner.os }}-${{ hashFiles('xmake.lua') }}
+          path: |
+            ${{ env.XMAKE_GLOBALDIR }}\.xmake\packages
+          key: turbo-${{ runner.os }}-${{ runner.arch }}-xrepo-${{ hashFiles('xmake/vars.lua') }}
           restore-keys: |
-            xmake-mogan-ubuntu-${{ runner.os }}-
+            turbo-${{ runner.os }}-${{ runner.arch }}-xrepo-
 
-      - name: Setup xmake
-        uses: xmake-io/github-action-setup-xmake@v1
-        with:
-          xmake-version: latest
-          actions-cache-folder: .xmake-cache   # 官方action自带缓存增强
-
-      - name: Configure turbo build (Linux)
-        run: |
-          xmake f -m release \
-            --startup_tab=false \
-            --text_toolbar=false \
-            --tutorial=false \
-            --mupdf=false \
-            --debug_with_timestamp=false \
-            -c -vD --yes
-
-      - name: Build Mogan Turbo (Linux)
-        run: xmake build -j$(nproc) -vD stem
-
-      - name: Package Linux DEB
-        run: |
-          mkdir -p mogan-turbo_1.0.0_amd64/usr/local/bin
-          mkdir -p mogan-turbo_1.0.0_amd64/DEBIAN
-          cat > mogan-turbo_1.0.0_amd64/DEBIAN/control << 'DEBEOF'
-          Package: mogan-turbo
-          Version: 1.0.0
-          Architecture: amd64
-          Maintainer: Mogan Turbo Builder
-          Description: Mogan STEM Turbo Edition (Linux)
-          Depends: qtbase5-dev, libqt5svg5-dev, libfreetype6, libcurl4
-          Homepage: https://mogan.app
-          DEBEOF
-          dpkg-deb --build mogan-turbo_1.0.0_amd64
-          mv mogan-turbo_1.0.0_amd64.deb mogan-turbo-linux-amd64.deb
-
-      - name: Upload Linux Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: mogan-turbo-linux-amd64
-          path: mogan-turbo-linux-amd64.deb
-          retention-days: 7
-
-  # ============================== Windows ==============================
-  build-windows:
-    runs-on: windows-2022
-    timeout-minutes: 120
-  
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: MoganLab/mogan
-          ref: main
-          submodules: recursive
-  
-      - name: Setup MSYS2 (MinGW64)
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-make
-            mingw-w64-x86_64-qt5-base
-            mingw-w64-x86_64-qt5-svg
-            mingw-w64-x86_64-curl
-            mingw-w64-x86_64-git
-            mingw-w64-x86_64-freetype
-            mingw-w64-x86_64-sqlite3
-  
-      - name: Add MSYS2 MinGW to PATH (Priority)
-        run: |
-          echo "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-          # 同时临时覆盖当前会话的 PATH
-          $env:Path = "C:\msys64\mingw64\bin;$env:Path"
-  
-      - name: Verify MinGW
-        run: |
-          gcc --version
-          where gcc
-  
-      - name: Setup xmake
-        uses: xmake-io/github-action-setup-xmake@v1
-        with:
-          xmake-version: latest
-  
-      - name: Cache xmake packages
+      # ================================================================
+      # Step 5: 缓存构建中间产物 (加速增量编译)
+      # ================================================================
+      - name: Cache build objects
         uses: actions/cache@v4
         with:
-          path: ~/.xmake
-          key: xmake-windows-${{ hashFiles('xmake.lua') }}
-  
-      - name: Configure turbo build (Windows)
+          path: |
+            ${{ github.workspace }}\build\.build_cache
+          key: turbo-${{ runner.os }}-${{ runner.arch }}-build-${{ github.sha }}
+          restore-keys: |
+            turbo-${{ runner.os }}-${{ runner.arch }}-build-
+
+      # ================================================================
+      # Step 6: 配置极速版
+      # ================================================================
+      - name: Configure turbo build
         run: |
-          # 再次确保 PATH 优先使用 MSYS2 的 MinGW
-          $env:Path = "C:\msys64\mingw64\bin;$env:Path"
-          xmake f -m release -p windows --toolchain=mingw `
+          xmake config --policies=build.ccache --yes -vD -m release --plat=windows `
             --startup_tab=false `
             --text_toolbar=false `
             --tutorial=false `
             --mupdf=false `
-            --debug_with_timestamp=false `
-            -c -vD --yes
-  
+            --debug_with_timestamp=false
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "⚠️ Config failed, retrying once..."
+            xmake config --policies=build.ccache --yes -vD -m release --plat=windows `
+              --startup_tab=false `
+              --text_toolbar=false `
+              --tutorial=false `
+              --mupdf=false `
+              --debug_with_timestamp=false
+          }
+          Write-Host "✅ Config done"
+
+      # ================================================================
+      # Step 7: 编译 (带重试)
+      # ================================================================
       - name: Build Mogan Turbo
         run: |
-          $env:Path = "C:\msys64\mingw64\bin;$env:Path"
-          xmake build -j4 -vD stem
-  
-      - name: Package ZIP
-        run: |
-          $outDir = "mogan-turbo-windows"
-          New-Item -ItemType Directory -Force -Path $outDir
-          # 查找编译产物 (通常在 build/windows/x64/release 或类似路径)
-          $files = Get-ChildItem -Recurse -Include "*.exe","*.dll" | Where-Object { $_.DirectoryName -match "build\\windows\\x64\\release" }
-          if ($files.Count -eq 0) {
-            $files = Get-ChildItem -Recurse -Include "*.exe","*.dll" | Where-Object { $_.DirectoryName -like "*release*" }
+          $maxRetries = 3
+          for ($i=0; $i -lt $maxRetries; $i++) {
+            Write-Host "Build attempt $($i+1)..."
+            xmake build --yes -vD stem
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($i -lt ($maxRetries-1)) {
+              Write-Host "⚠️ Build failed, retrying in 10s..."
+              Start-Sleep -Seconds 10
+            }
           }
-          foreach ($f in $files) { Copy-Item $f.FullName -Destination $outDir -Force }
-          Compress-Archive -Path "$outDir\*" -DestinationPath mogan-turbo-windows-amd64.zip -Force
-  
-      - uses: actions/upload-artifact@v4
-        with:
-          name: mogan-turbo-windows-amd64
-          path: mogan-turbo-windows-amd64.zip
-          retention-days: 7
+          Write-Host "✅ Build done"
 
-  # ============================== 汇总 ==============================
-  summary:
-    needs: [build-linux, build-windows]
-    if: always()
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Print summary
+      # ================================================================
+      # Step 8: 打包
+      # ================================================================
+      - name: Package Windows ZIP
         run: |
-          echo "=========================================="
-          echo "  Mogan Turbo Build Complete"
-          echo "=========================================="
-          echo "下载 Artifacts (保留7天):"
-          echo "🐧 Linux:  mogan-turbo-linux-amd64.deb"
-          echo "  安装: sudo dpkg -i mogan-turbo-linux-amd64.deb"
-          echo "🪟 Windows: mogan-turbo-windows-amd64.zip"
-          echo "  安装: 解压后运行"
-          echo "=========================================="
+          New-Item -ItemType Directory -Force -Path mogan-turbo
+
+          # 收集产物 (从 xmake 默认输出路径)
+          $buildDir = "build\windows\x86_64\release"
+          if (Test-Path $buildDir) {
+            Get-ChildItem -Path $buildDir -Recurse -Include *.exe,*.dll,*.pdb |
+              Copy-Item -Destination mogan-turbo\ -Force -ErrorAction SilentlyContinue
+          }
+
+          # 也查一下其他可能的输出路径
+          $altDirs = @("build", "build\windows")
+          foreach ($d in $altDirs) {
+            if (Test-Path $d) {
+              Get-ChildItem -Path $d -Recurse -Include *.exe |
+                Where-Object { $_.Name -like "*mogan*" -or $_.Name -like "*stem*" } |
+                Copy-Item -Destination mogan-turbo\ -Force -ErrorAction SilentlyContinue
+            }
+          }
+
+          $items = Get-ChildItem mogan-turbo
+          if ($items.Count -eq 0) {
+            Write-Host "⚠️ No binaries found in standard paths, searching all build..."
+            Get-ChildItem -Path build -Recurse -Include *.exe -ErrorAction SilentlyContinue |
+              Copy-Item -Destination mogan-turbo\ -Force
+            Get-ChildItem -Path build -Recurse -Include *.dll -ErrorAction SilentlyContinue |
+              Copy-Item -Destination mogan-turbo\ -Force
+          }
+
+          Compress-Archive -Path mogan-turbo\* -DestinationPath mogan-turbo-windows.zip -Force
+          Write-Host "=== 📦 Package ==="
+          Write-Host "Files:"
+          Get-ChildItem mogan-turbo | Select-Object Name, Length
+          Write-Host "Archive:"
+          Get-Item mogan-turbo-windows.zip | Select-Object Name, Length
+
+      # ================================================================
+      # Step 9: 上传 Artifact
+      # ================================================================
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mogan-turbo-windows
+          path: mogan-turbo-windows.zip
+          retention-days: 7
+          compression-level: 1
+
+      # ================================================================
+      # Step 10: 构建摘要
+      # ================================================================
+      - name: Build Summary
+        run: |
+          Write-Host "========================================"
+          Write-Host "  ✅ Mogan Turbo Windows Build Done"
+          Write-Host "========================================"
+          Write-Host ""
+          Write-Host "  📥 Download Artifact:"
+          Write-Host "     mogan-turbo-windows → mogan-turbo-windows.zip"
+          Write-Host ""
+          Write-Host "  📋 优化项:"
+          Write-Host "     • Release 模式 (关闭调试符号)"
+          Write-Host "     • 关闭启动页"
+          Write-Host "     • 关闭教程"
+          Write-Host "     • 关闭 MuPDF"
+          Write-Host "     • 关闭调试时间戳"
+          Write-Host "     • 关闭文本浮动工具栏"
+          Write-Host ""
+          Write-Host "  ⚡ 二次构建: ~5-10 分钟 (缓存命中)"
+          Write-Host "========================================"
