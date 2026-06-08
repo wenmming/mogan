@@ -100,15 +100,15 @@ jobs:
   build-windows:
     runs-on: windows-2022
     timeout-minutes: 120
-    # 删除 defaults.run.shell 配置，使用默认 PowerShell
-    
+    # 不使用 msys2 shell，改用 PowerShell
+  
     steps:
       - uses: actions/checkout@v4
         with:
           repository: MoganLab/mogan
           ref: main
           submodules: recursive
-    
+  
       - name: Setup MSYS2 (MinGW64)
         uses: msys2/setup-msys2@v2
         with:
@@ -123,42 +123,54 @@ jobs:
             mingw-w64-x86_64-git
             mingw-w64-x86_64-freetype
             mingw-w64-x86_64-sqlite3
-    
-      - name: Add MinGW to PATH (PowerShell)
+  
+      - name: Add MinGW to PATH
         run: echo "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-    
+  
+      # 验证 gcc 是否可用（可选）
+      - name: Verify MinGW
+        run: |
+          gcc --version
+          where gcc
+  
       - name: Setup xmake
         uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: latest
-    
+  
       - name: Cache xmake packages
         uses: actions/cache@v4
         with:
           path: ~/.xmake
           key: xmake-windows-${{ hashFiles('xmake.lua') }}
-    
+  
       - name: Configure turbo build (Windows)
         run: |
+          # 不再指定 --toolchain，让 xmake 自动检测 MinGW
           xmake f -m release -p mingw `
-            --toolchain="C:/msys64/mingw64" `
             --startup_tab=false `
             --text_toolbar=false `
             --tutorial=false `
             --mupdf=false `
             --debug_with_timestamp=false `
             -c -vD --yes
-    
+  
       - name: Build Mogan Turbo
         run: xmake build -j4 -vD stem
-    
+  
       - name: Package ZIP
         run: |
-          mkdir mogan-turbo-windows -Force
-          Get-ChildItem -Recurse -Filter "*.exe" | Where-Object { $_.FullName -match "build\\windows\\mingw\\release" } | Copy-Item -Destination mogan-turbo-windows -Force
-          Get-ChildItem -Recurse -Filter "*.dll" | Where-Object { $_.FullName -match "build\\windows\\mingw\\release" } | Copy-Item -Destination mogan-turbo-windows -Force
-          Compress-Archive -Path mogan-turbo-windows -DestinationPath mogan-turbo-windows-amd64.zip -Force
-    
+          $outDir = "mogan-turbo-windows"
+          New-Item -ItemType Directory -Force -Path $outDir
+          # 查找编译产物（通常在 build/windows/mingw/release）
+          $files = Get-ChildItem -Recurse -Include "*.exe","*.dll" | Where-Object { $_.DirectoryName -match "build\\windows\\mingw\\release" }
+          if ($files.Count -eq 0) {
+            Write-Host "No files found in release directory, trying full search..."
+            $files = Get-ChildItem -Recurse -Include "*.exe","*.dll" | Where-Object { $_.DirectoryName -like "*release*" }
+          }
+          foreach ($f in $files) { Copy-Item $f.FullName -Destination $outDir -Force }
+          Compress-Archive -Path "$outDir\*" -DestinationPath mogan-turbo-windows-amd64.zip -Force
+  
       - uses: actions/upload-artifact@v4
         with:
           name: mogan-turbo-windows-amd64
