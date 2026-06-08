@@ -98,27 +98,21 @@ jobs:
 
   # ============================== Windows ==============================
   build-windows:
-    if: github.event.inputs.platform == 'windows' || github.event.inputs.platform == 'both'
     runs-on: windows-2022
     timeout-minutes: 120
-    defaults:
-      run:
-        shell: msys2 {0}   # 使用 MSYS2 环境，方便调用 gcc/make
-
+    # 删除 defaults.run.shell 配置，使用默认 PowerShell
+    
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           repository: MoganLab/mogan
           ref: main
           submodules: recursive
-          fetch-depth: 1
-
-      - name: Setup MSYS2 (提供 MinGW-w64 13.2.0)
+    
+      - name: Setup MSYS2 (MinGW64)
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
-          release: false            # 使用最新版
           update: true
           install: >-
             mingw-w64-x86_64-gcc
@@ -129,49 +123,43 @@ jobs:
             mingw-w64-x86_64-git
             mingw-w64-x86_64-freetype
             mingw-w64-x86_64-sqlite3
-
-      # 注意：xmake 需要放在 MSYS2 路径之前？实际不冲突，但需确保 xmake 能被调用
-      - name: Setup xmake (Windows)
+    
+      - name: Add MinGW to PATH (PowerShell)
+        run: echo "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+    
+      - name: Setup xmake
         uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: latest
-          actions-cache-folder: .xmake-cache
-
-      - name: Configure turbo build (Windows - MinGW via MSYS2)
+    
+      - name: Cache xmake packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.xmake
+          key: xmake-windows-${{ hashFiles('xmake.lua') }}
+    
+      - name: Configure turbo build (Windows)
         run: |
-          # 将 MSYS2 的 MinGW bin 加入 PATH
-          echo "C:\msys64\mingw64\bin" >> $env:GITHUB_PATH
-          xmake f -m release -p mingw \
-            --toolchain="C:/msys64/mingw64" \
-            --startup_tab=false \
-            --text_toolbar=false \
-            --tutorial=false \
-            --mupdf=false \
-            --debug_with_timestamp=false \
+          xmake f -m release -p mingw `
+            --toolchain="C:/msys64/mingw64" `
+            --startup_tab=false `
+            --text_toolbar=false `
+            --tutorial=false `
+            --mupdf=false `
+            --debug_with_timestamp=false `
             -c -vD --yes
-
-      - name: Build Mogan Turbo (Windows)
+    
+      - name: Build Mogan Turbo
         run: xmake build -j4 -vD stem
-
-      - name: Package Windows ZIP (增强可靠性)
+    
+      - name: Package ZIP
         run: |
-          $outDir = "mogan-turbo-windows"
-          New-Item -ItemType Directory -Force -Path $outDir
-          # 查找编译生成的二进制文件 (通常位于 build 目录)
-          $binPaths = @(
-            (Get-ChildItem -Recurse -Filter "*.exe" | Where-Object { $_.FullName -match "build\\windows\\mingw\\release" })
-            (Get-ChildItem -Recurse -Filter "*.dll" | Where-Object { $_.FullName -match "build\\windows\\mingw\\release" })
-          )
-          if ($binPaths.Count -eq 0) {
-            Write-Host "未找到可执行文件，尝试模糊匹配..."
-            $binPaths = Get-ChildItem -Recurse -Include "*.exe","*.dll" | Where-Object { $_.DirectoryName -like "*release*" }
-          }
-          foreach ($f in $binPaths) { Copy-Item $f.FullName -Destination $outDir -Force }
-          Compress-Archive -Path "$outDir\*" -DestinationPath mogan-turbo-windows-amd64.zip -Force
-          Get-Item mogan-turbo-windows-amd64.zip | Select-Object Name, Length
-
-      - name: Upload Windows Artifact
-        uses: actions/upload-artifact@v4
+          mkdir mogan-turbo-windows -Force
+          Get-ChildItem -Recurse -Filter "*.exe" | Where-Object { $_.FullName -match "build\\windows\\mingw\\release" } | Copy-Item -Destination mogan-turbo-windows -Force
+          Get-ChildItem -Recurse -Filter "*.dll" | Where-Object { $_.FullName -match "build\\windows\\mingw\\release" } | Copy-Item -Destination mogan-turbo-windows -Force
+          Compress-Archive -Path mogan-turbo-windows -DestinationPath mogan-turbo-windows-amd64.zip -Force
+    
+      - uses: actions/upload-artifact@v4
         with:
           name: mogan-turbo-windows-amd64
           path: mogan-turbo-windows-amd64.zip
