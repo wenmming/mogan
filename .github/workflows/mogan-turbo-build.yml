@@ -123,12 +123,11 @@ jobs:
           ref: main
           submodules: recursive
 
-      - name: Install xmake (Windows)
-        run: |
-          curl -fsSL https://github.com/xmake-io/xmake/releases/download/v2.9.8/xmake-v2.9.8.win32.exe -o xmake-installer.exe
-          .\xmake-installer.exe /S
-          $env:Path += ";C:\Program Files (x86)\xmake"
-          xmake --version
+      - name: Setup Xmake (Windows)
+        uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: latest  # 或指定版本号，如 v2.9.8
+          # windows-long-path-support: true # Windows下如有长路径需求，可取消注释
 
       - name: Install MinGW (Windows)
         # Mogan 在 Windows 上需要 MinGW（MSVC 不支持变长数组）
