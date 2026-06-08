@@ -100,18 +100,18 @@ jobs:
       - name: Configure turbo build
         run: |
           xmake config --policies=build.ccache --yes -vD -m release --plat=windows `
+            --mupdf=false `
             --startup_tab=false `
             --text_toolbar=false `
             --tutorial=false `
-            --mupdf=false `
             --debug_with_timestamp=false
           if ($LASTEXITCODE -ne 0) {
             Write-Host "⚠️ Config failed, retrying once..."
             xmake config --policies=build.ccache --yes -vD -m release --plat=windows `
+              --mupdf=false `
               --startup_tab=false `
               --text_toolbar=false `
               --tutorial=false `
-              --mupdf=false `
               --debug_with_timestamp=false
           }
           Write-Host "✅ Config done"
