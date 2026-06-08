@@ -100,7 +100,6 @@ jobs:
   build-windows:
     runs-on: windows-2022
     timeout-minutes: 120
-    # 不使用 msys2 shell，改用 PowerShell
   
     steps:
       - uses: actions/checkout@v4
@@ -124,10 +123,12 @@ jobs:
             mingw-w64-x86_64-freetype
             mingw-w64-x86_64-sqlite3
   
-      - name: Add MinGW to PATH
-        run: echo "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Add MSYS2 MinGW to PATH (Priority)
+        run: |
+          echo "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          # 同时临时覆盖当前会话的 PATH
+          $env:Path = "C:\msys64\mingw64\bin;$env:Path"
   
-      # 验证 gcc 是否可用（可选）
       - name: Verify MinGW
         run: |
           gcc --version
@@ -146,8 +147,9 @@ jobs:
   
       - name: Configure turbo build (Windows)
         run: |
-          # 不再指定 --toolchain，让 xmake 自动检测 MinGW
-          xmake f -m release -p mingw `
+          # 再次确保 PATH 优先使用 MSYS2 的 MinGW
+          $env:Path = "C:\msys64\mingw64\bin;$env:Path"
+          xmake f -m release -p windows --toolchain=mingw `
             --startup_tab=false `
             --text_toolbar=false `
             --tutorial=false `
@@ -156,16 +158,17 @@ jobs:
             -c -vD --yes
   
       - name: Build Mogan Turbo
-        run: xmake build -j4 -vD stem
+        run: |
+          $env:Path = "C:\msys64\mingw64\bin;$env:Path"
+          xmake build -j4 -vD stem
   
       - name: Package ZIP
         run: |
           $outDir = "mogan-turbo-windows"
           New-Item -ItemType Directory -Force -Path $outDir
-          # 查找编译产物（通常在 build/windows/mingw/release）
-          $files = Get-ChildItem -Recurse -Include "*.exe","*.dll" | Where-Object { $_.DirectoryName -match "build\\windows\\mingw\\release" }
+          # 查找编译产物 (通常在 build/windows/x64/release 或类似路径)
+          $files = Get-ChildItem -Recurse -Include "*.exe","*.dll" | Where-Object { $_.DirectoryName -match "build\\windows\\x64\\release" }
           if ($files.Count -eq 0) {
-            Write-Host "No files found in release directory, trying full search..."
             $files = Get-ChildItem -Recurse -Include "*.exe","*.dll" | Where-Object { $_.DirectoryName -like "*release*" }
           }
           foreach ($f in $files) { Copy-Item $f.FullName -Destination $outDir -Force }
