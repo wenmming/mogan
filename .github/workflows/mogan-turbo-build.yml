@@ -1,0 +1,198 @@
+# .github/workflows/mogan-turbo-build.yml
+# Mogan 极速版 — GitHub Actions 自动云端编译 (Linux + Windows)
+#
+# 使用方法:
+#   1. Fork MoganLab/mogan 到你的 GitHub 账户
+#   2. 将此文件放到 .github/workflows/ 目录
+#   3. 点击 Actions → "Mogan Turbo Build" → Run workflow
+#   4. 编译完成后，在 Artifacts 中下载对应平台的安装包
+#
+# 预计编译时间: 30~60 分钟 / 平台
+
+name: Mogan Turbo Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: '编译目标平台'
+        type: choice
+        required: true
+        default: 'both'
+        options:
+          - linux
+          - windows
+          - both
+
+env:
+  BUILD_TYPE: turbo
+
+jobs:
+  # ==================================================================
+  # Job 1: Linux 编译
+  # ==================================================================
+  build-linux:
+    if: github.event.inputs.platform == 'linux' || github.event.inputs.platform == 'both'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          repository: MoganLab/mogan
+          ref: main
+          submodules: recursive
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libcurl4-openssl-dev pkg-config qtbase5-dev \
+            libqt5svg5-dev libjpeg-turbo8-dev libpng-dev \
+            libgit2-dev libfreetype6-dev libsqlite3-dev
+
+      - name: Cache xmake
+        uses: actions/cache@v4
+        with:
+          path: ~/.xmake
+          key: xmake-mogan-ubuntu
+
+      - name: Install xmake
+        run: |
+          if ! command -v xmake &> /dev/null; then
+            wget -q https://github.com/xmake-io/xmake/releases/download/v2.9.8/xmake_2.9.8_amd64.deb -O /tmp/xmake.deb
+            sudo dpkg -i /tmp/xmake.deb
+          fi
+          xmake --version
+
+      - name: Configure turbo build (Linux)
+        run: |
+          xmake f -m release \
+            --startup_tab=false \
+            --text_toolbar=false \
+            --tutorial=false \
+            --mupdf=false \
+            --debug_with_timestamp=false \
+            -c -vD --yes
+
+      - name: Build Mogan Turbo (Linux)
+        run: |
+          xmake build -j4 -vD stem
+
+      - name: Package Linux DEB
+        run: |
+          mkdir -p mogan-turbo_1.0.0_amd64/usr/local/bin
+          mkdir -p mogan-turbo_1.0.0_amd64/DEBIAN
+
+          cat > mogan-turbo_1.0.0_amd64/DEBIAN/control << 'DEBEOF'
+          Package: mogan-turbo
+          Version: 1.0.0
+          Architecture: amd64
+          Maintainer: Mogan Turbo Builder
+          Description: Mogan STEM Turbo Edition (Linux)
+           Optimized build: no debug, no tutorial, no MuPDF, no startup tab.
+          Depends: qtbase5-dev, libqt5svg5-dev, libfreetype6, libcurl4
+          Homepage: https://mogan.app
+          DEBEOF
+
+          dpkg-deb --build mogan-turbo_1.0.0_amd64
+          mv mogan-turbo_1.0.0_amd64.deb mogan-turbo-linux-amd64.deb
+          ls -lh mogan-turbo-linux-amd64.deb
+
+      - name: Upload Linux Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mogan-turbo-linux-amd64
+          path: mogan-turbo-linux-amd64.deb
+          retention-days: 7
+
+  # ==================================================================
+  # Job 2: Windows 编译
+  # ==================================================================
+  build-windows:
+    if: github.event.inputs.platform == 'windows' || github.event.inputs.platform == 'both'
+    runs-on: windows-2022
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          repository: MoganLab/mogan
+          ref: main
+          submodules: recursive
+
+      - name: Install xmake (Windows)
+        run: |
+          curl -fsSL https://github.com/xmake-io/xmake/releases/download/v2.9.8/xmake-v2.9.8.win32.exe -o xmake-installer.exe
+          .\xmake-installer.exe /S
+          $env:Path += ";C:\Program Files (x86)\xmake"
+          xmake --version
+
+      - name: Install MinGW (Windows)
+        # Mogan 在 Windows 上需要 MinGW（MSVC 不支持变长数组）
+        run: |
+          choco install mingw --version=13.2.0 -y --no-progress
+          refreshenv
+
+      - name: Install Qt 5 (Windows)
+        run: |
+          choco install qt5-default -y --no-progress 2>$null || echo "Qt via xmake"
+
+      - name: Configure turbo build (Windows)
+        run: |
+          $env:Path += ";C:\Program Files (x86)\xmake"
+          xmake f -m release -p mingw \
+            --startup_tab=false \
+            --text_toolbar=false \
+            --tutorial=false \
+            --mupdf=false \
+            --debug_with_timestamp=false \
+            -c -vD --yes
+
+      - name: Build Mogan Turbo (Windows)
+        run: |
+          $env:Path += ";C:\Program Files (x86)\xmake"
+          xmake build -j4 -vD stem
+
+      - name: Package Windows ZIP
+        run: |
+          mkdir mogan-turbo-windows
+          # 收集编译产物
+          Get-ChildItem -Recurse -Filter "*.exe" | Where-Object { $_.FullName -match "build|release" } | Copy-Item -Destination mogan-turbo-windows\
+          Get-ChildItem -Recurse -Filter "*.dll" | Where-Object { $_.FullName -match "build|release" } | Copy-Item -Destination mogan-turbo-windows\
+          Compress-Archive -Path mogan-turbo-windows -DestinationPath mogan-turbo-windows-amd64.zip
+          Write-Host "=== Windows 包大小 ==="
+          dir mogan-turbo-windows-amd64.zip
+
+      - name: Upload Windows Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mogan-turbo-windows-amd64
+          path: mogan-turbo-windows-amd64.zip
+          retention-days: 7
+
+  # ==================================================================
+  # Job 3: 构建摘要
+  # ==================================================================
+  summary:
+    needs: [build-linux, build-windows]
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Print summary
+        run: |
+          echo "=========================================="
+          echo "  Mogan Turbo Build Complete"
+          echo "=========================================="
+          echo ""
+          echo "  下载 Artifacts（7天有效）:"
+          echo ""
+          echo "  🐧 Linux:  mogan-turbo-linux-amd64.deb"
+          echo "    安装:  sudo dpkg -i mogan-turbo-linux-amd64.deb"
+          echo ""
+          echo "  🪟 Windows:  mogan-turbo-windows-amd64.zip"
+          echo "    安装:  解压后运行"
+          echo ""
+          echo "=========================================="
