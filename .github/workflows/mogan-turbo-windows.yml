@@ -1,0 +1,354 @@
+# .github/workflows/mogan-turbo-windows.yml
+# Mogan Windows 极速版 — 基于官方 ci-xmake-windows.yml 改造
+#
+# 与原版的区别:
+#   - 模式: releasedbg → release (关闭调试符号)
+#   - 关闭启动页: --startup_tab=false
+#   - 关闭教程: --tutorial=false
+#   - 关闭调试时间戳: --debug_with_timestamp=false
+#   - 关闭文本浮动工具栏: --text_toolbar=false
+#   - 打包时自动 windeployqt 部署 Qt 运行时 DLL
+#
+# ⚠ 关键: 不要加 --mupdf=false，MuPDF 是 Mogan 核心依赖
+#
+# 触发方式: workflow_dispatch (手动) / push & PR to main
+#
+# 预计编译时间: 首次 30-45 分钟 / 缓存命中 5-10 分钟
+
+name: Mogan Turbo Build (Windows)
+
+on:
+  workflow_dispatch:
+    inputs:
+      clear_cache:
+        description: 🗑️ 清除缓存重新构建
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-windows
+  cancel-in-progress: true
+
+jobs:
+  windows-turbo:
+    name: 🪟 Windows Turbo
+    runs-on: windows-2025
+    timeout-minutes: 60
+
+    env:
+      XMAKE_GLOBALDIR: "${{ github.workspace }}\\.xmake-global"
+
+    steps:
+      # ----------------------------------------------------------------
+      # Step 1: 清理缓存 (手动开启时)
+      # ----------------------------------------------------------------
+      - name: Clear cache
+        if: ${{ github.event.inputs.clear_cache == 'true' }}
+        run: |
+          Remove-Item -Recurse -Force "${{ env.XMAKE_GLOBALDIR }}" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "${{ github.workspace }}\build" -ErrorAction SilentlyContinue
+          Write-Host "✅ Cache cleared"
+
+      # ----------------------------------------------------------------
+      # Step 2: 安装 xmake (官方 action)
+      # ----------------------------------------------------------------
+      - name: Setup xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: v3.0.4
+
+      - name: Update xmake repo
+        run: |
+          xrepo update-repo
+
+      # ----------------------------------------------------------------
+      # Step 3: 检出代码
+      # ----------------------------------------------------------------
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          repository: MoganLab/mogan
+          ref: main
+          fetch-depth: 1
+
+      # ----------------------------------------------------------------
+      # Step 4: 缓存 xrepo 包
+      # ----------------------------------------------------------------
+      - name: Cache xrepo packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.XMAKE_GLOBALDIR }}\.xmake\packages
+          key: turbo-${{ runner.os }}-${{ runner.arch }}-xrepo-${{ hashFiles('xmake/vars.lua') }}
+          restore-keys: |
+            turbo-${{ runner.os }}-${{ runner.arch }}-xrepo-
+
+      # ----------------------------------------------------------------
+      # Step 5: 缓存构建
+      # ----------------------------------------------------------------
+      - name: Cache build objects
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}\build\.build_cache
+          key: turbo-${{ runner.os }}-${{ runner.arch }}-build-${{ github.sha }}
+          restore-keys: |
+            turbo-${{ runner.os }}-${{ runner.arch }}-build-
+
+      # ----------------------------------------------------------------
+      # Step 6: 配置极速版
+      # 注意: 不关 mupdf — 它是核心依赖，关闭会导致链接失败或运行时崩溃
+      # 不关 goldfish — 它是 Mogan STEM 默认组件
+      # ----------------------------------------------------------------
+      - name: Configure turbo build
+        run: |
+          xmake config --policies=build.ccache --yes -vD -m release --plat=windows `
+            --startup_tab=false `
+            --text_toolbar=false `
+            --tutorial=false `
+            --debug_with_timestamp=false
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "⚠️ Config failed, retrying once..."
+            xmake config --policies=build.ccache --yes -vD -m release --plat=windows `
+              --startup_tab=false `
+              --text_toolbar=false `
+              --tutorial=false `
+              --debug_with_timestamp=false
+          }
+          Write-Host "✅ Config done"
+
+      # ----------------------------------------------------------------
+      # Step 7: 编译
+      # ----------------------------------------------------------------
+      - name: Build Mogan Turbo
+        run: |
+          $maxRetries = 3
+          for ($i=0; $i -lt $maxRetries; $i++) {
+            Write-Host "Build attempt $($i+1)..."
+            xmake build --yes -vD stem
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($i -lt ($maxRetries-1)) {
+              Write-Host "⚠️ Build failed, retrying in 10s..."
+              Start-Sleep -Seconds 10
+            }
+          }
+          Write-Host "✅ Build done"
+
+      # ----------------------------------------------------------------
+      # Step 8: 查找编译产物
+      # ----------------------------------------------------------------
+      - name: Locate binaries
+        id: locate-bin
+        run: |
+          $exe = $null
+          $searchPaths = @(
+            "build\windows\x86_64\release",
+            "build\windows\x86_64\releasedbg",
+            "build"
+          )
+          foreach ($p in $searchPaths) {
+            if (Test-Path $p) {
+              $found = Get-ChildItem -Path $p -Recurse -Include *.exe |
+                Where-Object { $_.Name -like "*mogan*" -or $_.Name -like "*stem*" }
+              if ($found) {
+                $exe = $found[0].FullName
+                Write-Host "Found exe at: $exe"
+                break
+              }
+            }
+          }
+          if (-not $exe) {
+            Write-Host "::warning:: No exe found, searching entire build/"
+            $found = Get-ChildItem -Path build -Recurse -Include *.exe -ErrorAction SilentlyContinue
+            if ($found) {
+              $exe = $found[0].FullName
+              Write-Host "Found exe at: $exe"
+            }
+          }
+          Write-Host "EXE_PATH=$exe"
+          Add-Content -Path $env:GITHUB_ENV -Value "EXE_PATH=$exe"
+          Add-Content -Path $env:GITHUB_ENV -Value "EXE_DIR=$(Split-Path $exe -Parent)"
+
+      # ----------------------------------------------------------------
+      # Step 9: 查找 Qt 安装路径并部署 DLL
+      # 核心修复: 没有 windeployqt 部署的 DLL，Qt 应用在 Windows 上直接闪退
+      # ----------------------------------------------------------------
+      - name: Deploy Qt DLLs with windeployqt
+        run: |
+          $exeDir = "${{ env.EXE_DIR }}"
+          if (-not $exeDir -or $exeDir -eq ".") {
+            Write-Host "⚠️ No exe dir found, skipping deploy"
+            exit 0
+          }
+
+          # 从 xmake 缓存中找到 Qt 安装路径
+          $qtPaths = @(
+            "${{ env.XMAKE_GLOBALDIR }}\.xmake\packages\q\qt5",
+            "${{ env.XMAKE_GLOBALDIR }}\.xmake\packages\q\qt6",
+            "$env:LOCALAPPDATA\.xmake\packages\q\qt5",
+            "$env:LOCALAPPDATA\.xmake\packages\q\qt6",
+            "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Shared\Qt",
+            "C:\Qt"
+          )
+
+          $windeployqt = $null
+          foreach ($p in $qtPaths) {
+            if (Test-Path $p) {
+              Write-Host "Searching Qt in: $p"
+              $found = Get-ChildItem -Path $p -Recurse -Filter "windeployqt.exe" -ErrorAction SilentlyContinue
+              if ($found) {
+                $windeployqt = $found[0].FullName
+                Write-Host "Found windeployqt at: $windeployqt"
+                break
+              }
+            }
+          }
+
+          if (-not $windeployqt) {
+            # 在 PATH 中查找
+            $windeployqt = (Get-Command "windeployqt.exe" -ErrorAction SilentlyContinue).Source
+          }
+
+          if ($windeployqt) {
+            Write-Host "Running: $windeployqt $exeDir"
+            & $windeployqt $exeDir --release --no-translations --no-system-d3d-compiler --no-opengl-sw | Out-Host
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "✅ windeployqt completed"
+            } else {
+              Write-Host "⚠️ windeployqt exit code: $LASTEXITCODE"
+            }
+          } else {
+            Write-Host "⚠️ windeployqt not found, trying manual DLL copy..."
+            # 尝试直接从 xmake 包缓存复制 Qt DLL
+            $qtCacheDirs = @(
+              "${{ env.XMAKE_GLOBALDIR }}\.xmake\packages\q\qt5",
+              "$env:LOCALAPPDATA\.xmake\packages\q\qt5"
+            )
+            foreach ($qd in $qtCacheDirs) {
+              if (Test-Path $qd) {
+                $dllDir = Get-ChildItem -Path $qd -Recurse -Filter "Qt5Core.dll" -ErrorAction SilentlyContinue
+                if ($dllDir) {
+                  $srcDir = Split-Path $dllDir[0].FullName -Parent
+                  Write-Host "Copying DLLs from: $srcDir to: $exeDir"
+                  Copy-Item -Path "$srcDir\*.dll" -Destination $exeDir -Force -ErrorAction SilentlyContinue
+
+                  # 复制 platforms 插件
+                  $platDir = Join-Path (Split-Path $srcDir -Parent) "plugins\platforms"
+                  if (Test-Path $platDir) {
+                    $destPlat = Join-Path $exeDir "platforms"
+                    New-Item -ItemType Directory -Force -Path $destPlat | Out-Null
+                    Copy-Item -Path "$platDir\*" -Destination $destPlat -Force -Recurse
+                    Write-Host "✅ Copied platform plugins"
+                  }
+                  break
+                }
+              }
+            }
+          }
+
+          # 列出部署后的 DLL
+          Write-Host "=== DLLs in output dir ==="
+          Get-ChildItem -Path $exeDir -Filter "*.dll" | Select-Object Name, Length
+          Write-Host "=== Platforms ==="
+          if (Test-Path "$exeDir\platforms") {
+            Get-ChildItem -Path "$exeDir\platforms" | Select-Object Name, Length
+          } else {
+            Write-Host "⚠️ No platforms directory — app will fail to start!"
+          }
+
+      # ----------------------------------------------------------------
+      # Step 10: 复制 MinGW 运行时 DLL (libstdc++-6.dll 等)
+      # ----------------------------------------------------------------
+      - name: Bundle MinGW runtime DLLs
+        run: |
+          $exeDir = "${{ env.EXE_DIR }}"
+          $mingwDirs = @(
+            "C:\tools\mingw64\bin",
+            "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin",
+            "C:\msys64\mingw64\bin"
+          )
+          $neededDlls = @("libstdc++-6.dll", "libgcc_s_seh-1.dll", "libwinpthread-1.dll",
+                           "libpcre2-16-0.dll", "libpcre-1.dll", "libpng16-16.dll",
+                           "zlib1.dll", "libharfbuzz-0.dll", "libfreetype-6.dll",
+                           "libjpeg-9.dll", "libiconv-2.dll", "libintl-8.dll",
+                           "libsqlite3-0.dll")
+          foreach ($md in $mingwDirs) {
+            if (Test-Path $md) {
+              foreach ($dll in $neededDlls) {
+                $src = Join-Path $md $dll
+                if (Test-Path $src) {
+                  Copy-Item -Path $src -Destination "$exeDir\$dll" -Force -ErrorAction SilentlyContinue
+                  Write-Host "✅ Copied $dll"
+                }
+              }
+              break
+            }
+          }
+
+      # ----------------------------------------------------------------
+      # Step 11: 打包 ZIP
+      # ----------------------------------------------------------------
+      - name: Package ZIP
+        run: |
+          $exeDir = "${{ env.EXE_DIR }}"
+          if (-not $exeDir -or $exeDir -eq ".") {
+            Write-Host "⚠️ No exe dir, searching..."
+            $exeDir = "build\windows\x86_64\release"
+            if (-not (Test-Path $exeDir)) {
+              $exeDir = "build"
+            }
+          }
+
+          New-Item -ItemType Directory -Force -Path mogan-turbo
+          Write-Host "Copying from: $exeDir"
+          Get-ChildItem -Path $exeDir -File | Copy-Item -Destination mogan-turbo\ -Force -ErrorAction SilentlyContinue
+
+          # 复制子目录 (platforms, styles 等)
+          Get-ChildItem -Path $exeDir -Directory | ForEach-Object {
+            Copy-Item -Path $_.FullName -Destination "mogan-turbo\$($_.Name)" -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+          Compress-Archive -Path mogan-turbo\* -DestinationPath mogan-turbo-windows.zip -Force
+          Write-Host "=== 📦 Package Contents ==="
+          Get-ChildItem -Path mogan-turbo -Recurse | Select-Object Name, Length
+          Write-Host "=== 📦 Archive ==="
+          Get-Item mogan-turbo-windows.zip | Select-Object Name, Length
+
+      # ----------------------------------------------------------------
+      # Step 12: 上传 Artifact
+      # ----------------------------------------------------------------
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mogan-turbo-windows
+          path: mogan-turbo-windows.zip
+          retention-days: 7
+          compression-level: 1
+
+      # ----------------------------------------------------------------
+      # Step 13: 构建摘要
+      # ----------------------------------------------------------------
+      - name: Build Summary
+        run: |
+          Write-Host "==============================================="
+          Write-Host "  ✅ Mogan Turbo Windows Build Complete"
+          Write-Host "==============================================="
+          Write-Host ""
+          Write-Host "  📥 Download from Actions Artifacts:"
+          Write-Host "     mogan-turbo-windows → mogan-turbo-windows.zip"
+          Write-Host ""
+          Write-Host "  🚀 How to run:"
+          Write-Host "     1. 解压 ZIP"
+          Write-Host "     2. 双击 MoganSTEM.exe"
+          Write-Host "     3. 确保 platforms/qwindows.dll 存在"
+          Write-Host ""
+          Write-Host "  📋 极速版优化项:"
+          Write-Host "     • Release 模式 (关闭调试符号)"
+          Write-Host "     • 关闭启动页 (--startup_tab=false)"
+          Write-Host "     • 关闭教程 (--tutorial=false)"
+          Write-Host "     • 关闭调试时间戳 (--debug_with_timestamp=false)"
+          Write-Host "     • 关闭文本浮动工具栏 (--text_toolbar=false)"
+          Write-Host "     • MuPDF: 保留 (核心依赖)"
+          Write-Host ""
+          Write-Host "  ⚡ 二次构建: ~5-10 分钟 (缓存命中)"
+          Write-Host "==============================================="
