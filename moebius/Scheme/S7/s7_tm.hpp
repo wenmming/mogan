@@ -161,6 +161,10 @@ tmscm eval_scheme_file (string name);
 tmscm eval_scheme (string s);
 tmscm eval_scheme_root (string s);
 
+// Scheme cache (Turbo optimization — reduces 300 file loads to 1)
+bool load_scheme_cache (string cache_file);
+bool save_scheme_cache (string cache_file);
+
 tmscm call_scheme (tmscm fun);
 tmscm call_scheme (tmscm fun, tmscm a1);
 tmscm call_scheme (tmscm fun, tmscm a1, tmscm a2);
