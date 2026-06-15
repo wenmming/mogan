@@ -36,6 +36,7 @@
 #ifdef OS_MINGW
 #include <direct.h>
 #include <time.h>
+#include <windows.h>
 #endif
 #ifdef QTTEXMACS
 #include "Qt/QTMApplication.hpp"
@@ -153,6 +154,23 @@ init_texmacs_path (int& argc, char** argv) {
   (void) argv;
 #ifdef QTTEXMACS
   url exedir= url_system (qt_application_directory ());
+#elif defined(OS_MINGW)
+  // Windows (MinGW): use GetModuleFileNameW (UTF-16) instead of argv[0] (GBK)
+  // This fixes crashes when the executable is in a path containing CJK characters.
+  wchar_t wpath[MAX_PATH];
+  GetModuleFileNameW (NULL, wpath, MAX_PATH);
+  int len = WideCharToMultiByte (CP_UTF8, 0, wpath, -1, NULL, 0, NULL, NULL);
+  if (len > 0) {
+    char* utf8_path = new char[len];
+    WideCharToMultiByte (CP_UTF8, 0, wpath, -1, utf8_path, len, NULL, NULL);
+    exedir= url_system (string (utf8_path)) * "..";
+    delete[] utf8_path;
+  } else {
+    exedir= url_system (argv[0]) * "..";
+  }
+  if (!is_rooted (exedir)) {
+    exedir= url_pwd () * exedir;
+  }
 #else
   url exedir= url_system (argv[0]) * "..";
   if (!is_rooted (exedir)) {
@@ -569,6 +587,18 @@ init_texmacs_front () {
   init_main_paths ();
   init_user_dirs ();
   init_scheme ();
+
+  // Turbo: try loading from Scheme cache to skip 300+ file reads
+  url cache_dir= url_system ("$TEXMACS_HOME_PATH/system/cache");
+  url cache_file= cache_dir * url ("scheme-boot-cache.scm");
+  if (load_scheme_cache (as_string (cache_file))) {
+    // Cache hit — skip the slow file-by-file loading
+  }
+  else {
+    // First run — build and save the cache
+    save_scheme_cache (as_string (cache_file));
+  }
+
   init_env_vars ();
   init_misc ();
 }
